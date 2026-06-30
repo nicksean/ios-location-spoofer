@@ -1,9 +1,9 @@
 /*
- * Shadowrocket port of acheong08/ios-location-spoofer's core logic.
+ * iOS Location Spoofer — MITM Apple Wi-Fi/cellular location response patcher.
  *
- * It intercepts Apple's Wi-Fi location request, decodes the ARPC wrapper,
- * patches AppleWLoc protobuf wifi device locations, and returns an Apple-style
- * binary location response.
+ * Intercepts Apple's /clls/wloc location request, decodes the ARPC wrapper,
+ * patches AppleWLoc protobuf wifi device and cell tower locations, and
+ * returns an Apple-style binary location response.
  */
 (function () {
   "use strict";
@@ -33,7 +33,6 @@
 
   // Stable marker that precedes the AppleWLoc protobuf inside a REAL Apple /clls/wloc
   // response. After the marker come 2 bytes (uint16 BE payload length) then the payload.
-  // Validated against zadewg/GS-LOC and the acheong08 research.
   var APPLE_WLOC_MARKER = bytesFromArray([0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
   var ROOT_DROP_FIELDS = { 3: true, 4: true, 33: true };
   var CELL_RESPONSE_FIELDS = { 22: true, 24: true };

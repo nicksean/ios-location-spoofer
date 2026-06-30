@@ -1,7 +1,6 @@
 #!name=iOS Location Spoofer
-#!desc=基于 acheong08/ios-location-spoofer 的通用模块（Shadowrocket / Surge）。通过 MITM 拦截并修改 Apple WiFi/蜂窝定位响应（/clls/wloc），欺骗 iOS 系统定位。
-#!author=acheong08 (原始研究)
-#!homepage=https://github.com/acheong08/ios-location-spoofer
+#!desc=通过 MITM HTTPS 解密拦截 Apple WiFi/蜂窝定位响应（/clls/wloc），修改坐标数据欺骗 iOS 系统定位。支持 Shadowrocket / Surge。
+#!homepage=https://github.com/mekos2772/ios-location-spoofer
 
 [Script]
 # 默认模式: http-response — 拦截 Apple 返回的真实定位响应，修改其中的坐标数据后返回

@@ -1,12 +1,9 @@
 /*
  * iOS Location Spoofer — Quantumult X 适配版
- * 基于 acheong08/ios-location-spoofer 的核心逻辑
  *
  * QX 与 Surge/Shadowrocket 的区别：
  * - $response.body 是 base64 编码的字符串（二进制内容）
  * - $done({body: ...}) 需返回 base64 字符串
- *
- * 支持通过 location-spoofer-config.json 自定义坐标
  */
 (function () {
   "use strict";
