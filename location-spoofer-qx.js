@@ -7,7 +7,6 @@
 
   var DEFAULT_CONFIG = {
     enabled: true,
-    mode: "response",
     latitude: 37.3349,
     longitude: -122.00902,
     horizontalAccuracy: 39,
@@ -334,8 +333,6 @@
     input = input || {};
     for (key in input) { if (Object.prototype.hasOwnProperty.call(input, key)) cfg[key] = input[key]; }
     cfg.enabled = cfg.enabled !== false;
-    var modeStr = String(cfg.mode || "response").toLowerCase();
-    cfg.mode = (modeStr === "inspect") ? "inspect" : "response";
     cfg.latitude = Number(cfg.latitude); cfg.longitude = Number(cfg.longitude);
     cfg.horizontalAccuracy = Math.trunc(Number(cfg.horizontalAccuracy));
     cfg.verticalAccuracy = Math.trunc(Number(cfg.verticalAccuracy));
@@ -351,30 +348,8 @@
   }
 
   function loadConfig() {
-    // 与 SR 对齐：从 $argument 读运行时配置。QX $argument 是 URL query string 形式
-    // (例如 module 配置里 argument=mode=response&latitude=...&debug=true)
-    // QX 不支持 $httpClient，所以 configUrl 这条路在 QX 上不存在；仅支持
-    // 模块 inline argument。
-    var raw = (typeof $argument !== "undefined" && $argument) || "";
-    var args = parseArgumentStringQX(raw);
-    var merged = mergeConfig(DEFAULT_CONFIG, args);
-    return normalizeConfig(merged);
-  }
-
-  function parseArgumentStringQX(arg) {
-    var out = {};
-    if (!arg || typeof arg !== "string") return out;
-    var pairs = arg.split(/[&;]/);
-    for (var i = 0; i < pairs.length; i++) {
-      var p = pairs[i];
-      if (!p) continue;
-      var eq = p.indexOf("=");
-      var k = eq >= 0 ? p.slice(0, eq) : p;
-      var v = eq >= 0 ? p.slice(eq + 1) : "true";
-      try { out[decodeURIComponent(k)] = decodeURIComponent(v); }
-      catch (e) { out[k] = v; }
-    }
-    return out;
+    // 仅使用内置默认配置，不发起任何外部网络请求
+    return normalizeConfig(DEFAULT_CONFIG);
   }
 
   function mergeConfig(base, extra) {
@@ -386,189 +361,111 @@
   }
 
   // ========== QX Entry Point ==========
-  // 与 location-spoofer.js (runShadowrocket) 的设计对齐：
-  //   * 4 源 fallback 读 body（bodyBytes > body > rawBody > binaryBody）
-  //   * 同步加载 config（QX 无 $httpClient）
-  //   * 自动处理 gzip/deflate/br 压缩
-  //   * headersWithBinaryBody 工具：复制原头、过滤掉按 body 重算的字段
-  //   * 集中 $done 调用，便于排错
-  //   * mode dispatch：response / inspect / probe / request
 
-  // ---------- body 解码工具（对齐 SR 的 messageBodyToBytes） ----------
-
-  function bytesFromBinaryString(value) {
-    var out = new Uint8Array(value.length);
-    for (var i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
-    return out;
-  }
-
-  function bodyToBytes(body) {
-    if (body == null) return null;
-    if (body instanceof Uint8Array) return body;
-    if (typeof ArrayBuffer !== "undefined" && body instanceof ArrayBuffer) return new Uint8Array(body);
-    if (typeof body === "string") return bytesFromBinaryString(body);
-    if (typeof body === "object" && typeof body.length === "number") return new Uint8Array(body);
-    if (typeof body === "object" && body.bytes && typeof body.bytes.length === "number") return new Uint8Array(body.bytes);
-    if (typeof body === "object" && body.data && typeof body.data.length === "number") return new Uint8Array(body.data);
-    return null;
-  }
+  // QX 不同版本对二进制 body 的处理不同：
+  //
+  // v1.0.19+ (build480, 2021-01) [主流]：
+  //   $response.bodyBytes = ArrayBuffer  ← 读这个
+  //   $done({bodyBytes: ArrayBuffer})      ← 回写这个
+  //
+  // 更早版本（极少见）：
+  //   $response.body = base64 字符串
+  //   $done({body: base64字符串})
+  //
+  // 这里自动检测当前 QX 支持哪个 API，不挑版本。
 
   function readQXResponseBytes() {
-    // 路径 1：bodyBytes（QX 主流 v1.0.19+）
+    // 路径 A：新 QX — bodyBytes (ArrayBuffer / Uint8Array)
     var bb = typeof $response.bodyBytes !== "undefined" ? $response.bodyBytes : null;
     if (bb) {
-      var b = bodyToBytes(bb);
-      if (b && b.length > 0) return { bytes: b, source: "bodyBytes" };
+      if (bb instanceof Uint8Array) {
+        if (bb.length > 0) return { bytes: bb, source: "bodyBytes(Uint8Array)" };
+      } else if (bb.byteLength !== undefined) {
+        // ArrayBuffer 或其视图
+        var view = new Uint8Array(bb);
+        if (view.length > 0) return { bytes: view, source: "bodyBytes(ArrayBuffer)" };
+      }
     }
 
-    // 路径 2：body (旧版 base64 / 文本)
-    var raw = $response && $response.body;
-    var b2 = bodyToBytes(raw);
-    if (b2 && b2.length > 0) return { bytes: b2, source: "body" };
-
-    // 路径 3：rawBody / binaryBody 别名
-    if ($response) {
-      var b3 = bodyToBytes($response.rawBody) || bodyToBytes($response.binaryBody);
-      if (b3 && b3.length > 0) return { bytes: b3, source: "rawBody/binaryBody" };
+    // 路径 B：旧 QX — body (base64 字符串)
+    var b = typeof $response.body === "string" && $response.body.length > 0 ? $response.body : null;
+    if (b) {
+      var dec = base64ToBytes(b);
+      if (dec && dec.length > 0) return { bytes: dec, source: "body(base64)" };
     }
 
-    if (bb !== null && bb !== undefined) return { bytes: null, source: "bodyBytes(empty)" };
+    // 路径 C：bodyBytes 存在但长度为 0 — 可能是空响应
+    if (bb !== null && bb !== undefined) {
+      return { bytes: null, source: "bodyBytes(empty)" };
+    }
+
     return { bytes: null, source: "unavailable" };
   }
 
-  // ---------- headers 工具（对齐 SR 的 headersWithBinaryBody） ----------
-
-  function headersWithBinaryBody(sourceHeaders, length) {
-    var headers = {};
-    sourceHeaders = sourceHeaders || {};
-    for (var key in sourceHeaders) {
-      if (!Object.prototype.hasOwnProperty.call(sourceHeaders, key)) continue;
-      var lower = key.toLowerCase();
-      if (lower === "content-length" || lower === "content-encoding" || lower === "transfer-encoding") continue;
-      headers[key] = sourceHeaders[key];
-    }
-    headers["Content-Type"] = "application/octet-stream";
-    headers["Content-Length"] = String(length);
-    return headers;
-  }
-
-  // ---------- 解压（对齐 SR 的 decompressBody） ----------
-
-  function decompressBody(body, contentEncoding) {
-    if (!body || !contentEncoding) return body;
-    var enc = String(contentEncoding).toLowerCase();
-    if (enc === "identity" || enc === "") return body;
-    try {
-      if (typeof $utils !== "undefined") {
-        if (enc.indexOf("gzip") >= 0 && $utils.ungzip) return $utils.ungzip(body);
-        if (enc.indexOf("deflate") >= 0 && $utils.inflate) return $utils.inflate(body);
-        if (enc.indexOf("br") >= 0 && $utils.brotliDecompress) return $utils.brotliDecompress(body);
-      }
-    } catch (e) {
-      if (typeof console !== "undefined") console.log("Location spoofer decompress failed (" + enc + "): " + e.message);
-    }
-    return body;
-  }
-
-  // ---------- $done 封装（对齐 SR 的 doneWriteResponse / donePassThrough） ----------
-
-  function donePassThrough() { $done({}); }
-
-  function doneRewriteResponse(uint8, info) {
-    var sourceHeaders = (typeof $response !== "undefined" && $response.headers) || {};
-    var headers = headersWithBinaryBody(sourceHeaders, uint8.byteLength);
-    if (info && info.debug) {
-      headers["X-Location-Spoofer-Wifi-Count"] = String(info.wifiCount || 0);
-      headers["X-Location-Spoofer-Cell-Count"] = String(info.cellCount || 0);
-    }
-    // QX 支持 $done({headers, bodyBytes})，新版本生效
+  function doneWithArrayBuffer(uint8) {
+    // 仅作为没拿到原响应头时的 fallback；
+    // 主路径在 runQX 里内联处理 headers。
     $done({
-      headers: headers,
-      bodyBytes: uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength)
+      bodyBytes: uint8.buffer.slice(
+        uint8.byteOffset,
+        uint8.byteOffset + uint8.byteLength
+      )
     });
   }
 
-  // ---------- 主入口（对齐 SR 的 runShadowrocket） ----------
-
   function runQX() {
     var hasResponse = typeof $response !== "undefined";
-    var hasRequest = typeof $request !== "undefined";
-    if (!hasRequest && !hasResponse) return;
 
-    var config = loadConfig();
-
-    try {
-      if (!config.enabled) { donePassThrough(); return; }
-
-      // mode = inspect：只打印 payload 信息，不改 body
-      if (config.mode === "inspect" && hasResponse) {
-        if (config.debug) {
-          var readProbe = readQXResponseBytes();
-          console.log("Location spoofer QX inspect source: " + readProbe.source);
-          if (readProbe.bytes) {
-            console.log("Location spoofer QX inspect body: len=" + readProbe.bytes.length + ", head=" + hexPreview(readProbe.bytes, 48));
-            try {
-              var ext = extractAppleWLocPayload(readProbe.bytes);
-              console.log("Location spoofer QX inspect extraction: kind=" + ext.kind + ", payloadLen=" + ext.payload.length);
-            } catch (e) { console.log("Location spoofer QX inspect extraction failed: " + e.message); }
-          }
-        }
-        donePassThrough();
-        return;
-      }
-
-      if (hasResponse) {
-        if (config.mode !== "response") { donePassThrough(); return; }
+    if (hasResponse) {
+      var config = loadConfig();
+      try {
+        if (!config.enabled) { $done({}); return; }
 
         var readResult = readQXResponseBytes();
         if (config.debug) console.log("Location spoofer QX body source: " + readResult.source);
 
         if (!readResult.bytes || readResult.bytes.length < 2) {
           if (config.debug) console.log("Location spoofer QX body too short or " + readResult.source);
-          donePassThrough();
+          $done({});
           return;
-        }
-
-        // 处理 Content-Encoding（对齐 SR 第 1248 行）
-        var srcHeaders = ($response && $response.headers) || {};
-        var contentEncoding = null;
-        for (var hk in srcHeaders) {
-          if (Object.prototype.hasOwnProperty.call(srcHeaders, hk) && hk.toLowerCase() === "content-encoding") {
-            contentEncoding = srcHeaders[hk];
-            break;
-          }
-        }
-        if (contentEncoding && readResult.bytes) {
-          // QX 的 $utils.ungzip 接受字符串并返回 binary string，再转回 Uint8Array
-          var decoded = decompressBody($response.body, contentEncoding);
-          if (decoded && decoded !== $response.body) {
-            var decBytes = bodyToBytes(decoded);
-            if (decBytes && decBytes.length > 0) readResult.bytes = decBytes;
-          }
         }
 
         if (config.debug) console.log("Location spoofer QX response: " + readResult.bytes.length + " bytes, head=" + hexPreview(readResult.bytes, 32));
 
         var result = spoofAppleResponse(readResult.bytes, config);
+        if (config.debug) console.log("Location spoofer patched " + result.wifiCount + " wifi, " + result.cellCount + " cell, kind=" + result.kind + ", response=" + result.response.length + " bytes");
+        if (config.debug) console.log("Location spoofer locations: " + patchedPayloadSummary(result.payload));
+
+        var out = result.response;
+        var outAb = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+        var srcHeaders = ($response && $response.headers) || {};
+
+        // 复制原响应头，过滤掉按 body 自动计算的字段
+        var outHeaders = {};
+        for (var hk in srcHeaders) {
+          if (!Object.prototype.hasOwnProperty.call(srcHeaders, hk)) continue;
+          var hkLow = hk.toLowerCase();
+          if (hkLow === "content-length" || hkLow === "content-encoding" || hkLow === "transfer-encoding") continue;
+          outHeaders[hk] = srcHeaders[hk];
+        }
+        outHeaders["Content-Type"] = "application/octet-stream";
+        outHeaders["Content-Length"] = String(out.byteLength);
         if (config.debug) {
-          console.log("Location spoofer patched " + result.wifiCount + " wifi, " + result.cellCount + " cell, kind=" + result.kind + ", response=" + result.response.length + " bytes");
-          console.log("Location spoofer locations: " + patchedPayloadSummary(result.payload));
-          console.log("Location spoofer QX writing bodyBytes=" + result.response.byteLength + " with rewritten headers");
+          outHeaders["X-Location-Spoofer-Wifi-Count"] = String(result.wifiCount);
+          outHeaders["X-Location-Spoofer-Cell-Count"] = String(result.cellCount || 0);
+          console.log("Location spoofer QX writing bodyBytes=" + out.byteLength + " with rewritten headers");
         }
 
-        doneRewriteResponse(result.response, {
-          wifiCount: result.wifiCount,
-          cellCount: result.cellCount,
-          debug: config.debug
+        $done({
+          headers: outHeaders,
+          bodyBytes: outAb
         });
-        return;
+      } catch (err) {
+        if (config.debug) console.log("Location spoofer failed: " + err.message);
+        $done({});
       }
-
-      // 没有 $response（QX 在 script-request-body 这种模式才会出现，目前不用）
-      donePassThrough();
-    } catch (err) {
-      if (config.debug) console.log("Location spoofer failed: " + err.message);
-      donePassThrough();
+    } else {
+      $done({});
     }
   }
 
